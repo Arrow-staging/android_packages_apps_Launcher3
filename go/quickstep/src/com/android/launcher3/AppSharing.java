@@ -16,12 +16,17 @@
 
 package com.android.launcher3;
 
+import static com.android.launcher3.logging.StatsLogManager.LauncherEvent.LAUNCHER_SYSTEM_SHORTCUT_APP_SHARE_TAP;
+
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.os.Process;
+import android.os.UserHandle;
+import android.os.UserManager;
 import android.text.TextUtils;
 import android.util.Log;
 import android.view.View;
@@ -36,6 +41,7 @@ import com.android.launcher3.model.AppShareabilityManager.ShareabilityStatus;
 import com.android.launcher3.model.data.ItemInfo;
 import com.android.launcher3.popup.PopupDataProvider;
 import com.android.launcher3.popup.SystemShortcut;
+import com.android.launcher3.views.ActivityContext;
 
 import java.io.File;
 
@@ -74,11 +80,12 @@ public final class AppSharing {
         return FileProvider.getUriForFile(context, authority, pathFile, displayName);
     }
 
-    private SystemShortcut<Launcher> getShortcut(Launcher launcher, ItemInfo info) {
+    private SystemShortcut<Launcher> getShortcut(Launcher launcher, ItemInfo info,
+            View originalView) {
         if (TextUtils.isEmpty(mSharingComponent)) {
             return null;
         }
-        return new Share(launcher, info);
+        return new Share(launcher, info, originalView);
     }
 
     /**
@@ -98,20 +105,28 @@ public final class AppSharing {
      * The Share App system shortcut, used to initiate p2p sharing of a given app
      */
     public final class Share extends SystemShortcut<Launcher> {
-        private PopupDataProvider mPopupDataProvider;
+        private final PopupDataProvider mPopupDataProvider;
+        private final boolean mSharingEnabledForUser;
 
-        public Share(Launcher target, ItemInfo itemInfo) {
-            super(R.drawable.ic_share, R.string.app_share_drop_target_label, target, itemInfo);
+        public Share(Launcher target, ItemInfo itemInfo, View originalView) {
+            super(R.drawable.ic_share, R.string.app_share_drop_target_label, target, itemInfo,
+                    originalView);
             mPopupDataProvider = target.getPopupDataProvider();
 
-            if (ENABLE_SHAREABILITY_CHECK) {
-                mShareabilityMgr = AppShareabilityManager.INSTANCE.get(target);
+            mSharingEnabledForUser = bluetoothSharingEnabled(target);
+            if (!mSharingEnabledForUser) {
+                setEnabled(false);
+            } else if (ENABLE_SHAREABILITY_CHECK) {
+                mShareabilityMgr =
+                        AppShareabilityManager.INSTANCE.get(target.getApplicationContext());
                 checkShareability(/* requestUpdateIfUnknown */ true);
             }
         }
 
         @Override
         public void onClick(View view) {
+            ActivityContext.lookupContext(view.getContext())
+                    .getStatsLogManager().logger().log(LAUNCHER_SYSTEM_SHORTCUT_APP_SHARE_TAP);
             if (!isEnabled()) {
                 showCannotShareToast(view.getContext());
                 return;
@@ -144,7 +159,12 @@ public final class AppSharing {
             sendIntent.setType(APP_MIME_TYPE);
             sendIntent.setComponent(ComponentName.unflattenFromString(mSharingComponent));
 
-            mTarget.startActivitySafely(view, sendIntent, mItemInfo);
+            UserHandle user = mItemInfo.user;
+            if (user != null && !user.equals(Process.myUserHandle())) {
+                mTarget.startActivityAsUser(sendIntent, user);
+            } else {
+                mTarget.startActivitySafely(view, sendIntent, mItemInfo);
+            }
 
             AbstractFloatingView.closeAllOpenViews(mTarget);
         }
@@ -170,8 +190,20 @@ public final class AppSharing {
             }
         }
 
+        private boolean bluetoothSharingEnabled(Context context) {
+            return !context.getSystemService(UserManager.class)
+                    .hasUserRestriction(UserManager.DISALLOW_BLUETOOTH_SHARING, mItemInfo.user);
+        }
+
         private void showCannotShareToast(Context context) {
-            CharSequence text = context.getText(R.string.toast_p2p_app_not_shareable);
+            ActivityContext activityContext = ActivityContext.lookupContext(context);
+            String blockedByMessage = activityContext.getStringCache() != null
+                    ? activityContext.getStringCache().disabledByAdminMessage
+                    : context.getString(R.string.blocked_by_policy);
+
+            CharSequence text = (mSharingEnabledForUser)
+                    ? context.getText(R.string.toast_p2p_app_not_shareable)
+                    : blockedByMessage;
             int duration = Toast.LENGTH_SHORT;
             Toast.makeText(context, text, duration).show();
         }
@@ -180,6 +212,7 @@ public final class AppSharing {
     /**
      * Shortcut factory for generating the Share App button
      */
-    public static final SystemShortcut.Factory<Launcher> SHORTCUT_FACTORY = (launcher, itemInfo) ->
-            (new AppSharing(launcher)).getShortcut(launcher, itemInfo);
+    public static final SystemShortcut.Factory<Launcher> SHORTCUT_FACTORY =
+            (launcher, itemInfo, originalView) ->
+                    (new AppSharing(launcher)).getShortcut(launcher, itemInfo, originalView);
 }

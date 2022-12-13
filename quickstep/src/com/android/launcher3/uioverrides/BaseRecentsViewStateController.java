@@ -23,27 +23,32 @@ import static com.android.launcher3.anim.Interpolators.LINEAR;
 import static com.android.launcher3.states.StateAnimationConfig.ANIM_OVERVIEW_FADE;
 import static com.android.launcher3.states.StateAnimationConfig.ANIM_OVERVIEW_MODAL;
 import static com.android.launcher3.states.StateAnimationConfig.ANIM_OVERVIEW_SCALE;
+import static com.android.launcher3.states.StateAnimationConfig.ANIM_OVERVIEW_SPLIT_SELECT_FLOATING_TASK_TRANSLATE_OFFSCREEN;
+import static com.android.launcher3.states.StateAnimationConfig.ANIM_OVERVIEW_SPLIT_SELECT_INSTRUCTIONS_FADE;
 import static com.android.launcher3.states.StateAnimationConfig.ANIM_OVERVIEW_TRANSLATE_X;
 import static com.android.launcher3.states.StateAnimationConfig.ANIM_OVERVIEW_TRANSLATE_Y;
 import static com.android.launcher3.states.StateAnimationConfig.SKIP_OVERVIEW;
+import static com.android.quickstep.views.FloatingTaskView.PRIMARY_TRANSLATE_OFFSCREEN;
 import static com.android.quickstep.views.RecentsView.ADJACENT_PAGE_HORIZONTAL_OFFSET;
 import static com.android.quickstep.views.RecentsView.RECENTS_GRID_PROGRESS;
 import static com.android.quickstep.views.RecentsView.RECENTS_SCALE_PROPERTY;
-import static com.android.quickstep.views.RecentsView.TASK_PRIMARY_SPLIT_TRANSLATION;
-import static com.android.quickstep.views.RecentsView.TASK_SECONDARY_SPLIT_TRANSLATION;
 import static com.android.quickstep.views.RecentsView.TASK_SECONDARY_TRANSLATION;
+import static com.android.quickstep.views.RecentsView.TASK_THUMBNAIL_SPLASH_ALPHA;
 
+import android.graphics.Rect;
+import android.graphics.RectF;
 import android.util.FloatProperty;
-import android.util.Pair;
+import android.view.animation.Interpolator;
 
 import androidx.annotation.NonNull;
 
-import com.android.launcher3.BaseQuickstepLauncher;
 import com.android.launcher3.LauncherState;
+import com.android.launcher3.Utilities;
 import com.android.launcher3.anim.PendingAnimation;
+import com.android.launcher3.dragndrop.DragLayer;
 import com.android.launcher3.statemanager.StateManager.StateHandler;
 import com.android.launcher3.states.StateAnimationConfig;
-import com.android.launcher3.touch.PagedOrientationHandler;
+import com.android.quickstep.views.FloatingTaskView;
 import com.android.quickstep.views.RecentsView;
 
 /**
@@ -55,9 +60,9 @@ import com.android.quickstep.views.RecentsView;
 public abstract class BaseRecentsViewStateController<T extends RecentsView>
         implements StateHandler<LauncherState> {
     protected final T mRecentsView;
-    protected final BaseQuickstepLauncher mLauncher;
+    protected final QuickstepLauncher mLauncher;
 
-    public BaseRecentsViewStateController(@NonNull BaseQuickstepLauncher launcher) {
+    public BaseRecentsViewStateController(@NonNull QuickstepLauncher launcher) {
         mLauncher = launcher;
         mRecentsView = launcher.getOverviewPanel();
     }
@@ -73,6 +78,7 @@ public abstract class BaseRecentsViewStateController<T extends RecentsView>
         getTaskModalnessProperty().set(mRecentsView, state.getOverviewModalness());
         RECENTS_GRID_PROGRESS.set(mRecentsView,
                 state.displayOverviewTasksAsGrid(mLauncher.getDeviceProfile()) ? 1f : 0f);
+        TASK_THUMBNAIL_SPLASH_ALPHA.set(mRecentsView, state.showTaskThumbnailSplash() ? 1f : 0f);
     }
 
     @Override
@@ -82,6 +88,11 @@ public abstract class BaseRecentsViewStateController<T extends RecentsView>
             return;
         }
         setStateWithAnimationInternal(toState, config, builder);
+        builder.addEndListener(success -> {
+            if (!success) {
+                mRecentsView.reset();
+            }
+        });
     }
 
     /**
@@ -100,15 +111,50 @@ public abstract class BaseRecentsViewStateController<T extends RecentsView>
                 config.getInterpolator(ANIM_OVERVIEW_TRANSLATE_X, LINEAR));
         setter.setFloat(mRecentsView, TASK_SECONDARY_TRANSLATION, 0f,
                 config.getInterpolator(ANIM_OVERVIEW_TRANSLATE_Y, LINEAR));
-        PagedOrientationHandler orientationHandler =
-                ((RecentsView) mLauncher.getOverviewPanel()).getPagedOrientationHandler();
-        Pair<FloatProperty, FloatProperty> taskViewsFloat =
-                orientationHandler.getSplitSelectTaskOffset(
-                        TASK_PRIMARY_SPLIT_TRANSLATION, TASK_SECONDARY_SPLIT_TRANSLATION,
-                        mLauncher.getDeviceProfile());
-        setter.setFloat(mRecentsView, taskViewsFloat.first,
-                toState.getSplitSelectTranslation(mLauncher), LINEAR);
-        setter.setFloat(mRecentsView, taskViewsFloat.second, 0, LINEAR);
+
+        if (mRecentsView.isSplitSelectionActive()) {
+            // TODO (b/238651489): Refactor state management to avoid need for double check
+            FloatingTaskView floatingTask = mRecentsView.getFirstFloatingTaskView();
+            if (floatingTask != null) {
+                // We are in split selection state currently, transitioning to another state
+                DragLayer dragLayer = mLauncher.getDragLayer();
+                RectF onScreenRectF = new RectF();
+                Utilities.getBoundsForViewInDragLayer(mLauncher.getDragLayer(), floatingTask,
+                        new Rect(0, 0, floatingTask.getWidth(), floatingTask.getHeight()),
+                        false, null, onScreenRectF);
+                // Get the part of the floatingTask that intersects with the DragLayer (i.e. the
+                // on-screen portion)
+                onScreenRectF.intersect(
+                        dragLayer.getLeft(),
+                        dragLayer.getTop(),
+                        dragLayer.getRight(),
+                        dragLayer.getBottom()
+                );
+
+                setter.setFloat(
+                        mRecentsView.getFirstFloatingTaskView(),
+                        PRIMARY_TRANSLATE_OFFSCREEN,
+                        mRecentsView.getPagedOrientationHandler()
+                                .getFloatingTaskOffscreenTranslationTarget(
+                                        floatingTask,
+                                        onScreenRectF,
+                                        floatingTask.getStagePosition(),
+                                        mLauncher.getDeviceProfile()
+                                ),
+                        config.getInterpolator(
+                                ANIM_OVERVIEW_SPLIT_SELECT_FLOATING_TASK_TRANSLATE_OFFSCREEN,
+                                LINEAR
+                        ));
+                setter.setViewAlpha(
+                        mRecentsView.getSplitInstructionsView(),
+                        0,
+                        config.getInterpolator(
+                                ANIM_OVERVIEW_SPLIT_SELECT_INSTRUCTIONS_FADE,
+                                LINEAR
+                        )
+                );
+            }
+        }
 
         setter.setFloat(mRecentsView, getContentAlphaProperty(), toState.overviewUi ? 1 : 0,
                 config.getInterpolator(ANIM_OVERVIEW_FADE, AGGRESSIVE_EASE_IN_OUT));
@@ -117,9 +163,19 @@ public abstract class BaseRecentsViewStateController<T extends RecentsView>
                 mRecentsView, getTaskModalnessProperty(),
                 toState.getOverviewModalness(),
                 config.getInterpolator(ANIM_OVERVIEW_MODAL, LINEAR));
+
+        LauncherState fromState = mLauncher.getStateManager().getState();
+        setter.setFloat(mRecentsView, TASK_THUMBNAIL_SPLASH_ALPHA,
+                toState.showTaskThumbnailSplash() ? 1f : 0f,
+                !toState.showTaskThumbnailSplash() && fromState == LauncherState.QUICK_SWITCH
+                        ? LINEAR : INSTANT);
+
         boolean showAsGrid = toState.displayOverviewTasksAsGrid(mLauncher.getDeviceProfile());
+        Interpolator gridProgressInterpolator = showAsGrid
+                ? fromState == LauncherState.QUICK_SWITCH ? LINEAR : INSTANT
+                : FINAL_FRAME;
         setter.setFloat(mRecentsView, RECENTS_GRID_PROGRESS, showAsGrid ? 1f : 0f,
-                showAsGrid ? INSTANT : FINAL_FRAME);
+                gridProgressInterpolator);
     }
 
     abstract FloatProperty getTaskModalnessProperty();

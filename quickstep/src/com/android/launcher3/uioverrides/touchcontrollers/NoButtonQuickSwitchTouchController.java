@@ -27,6 +27,7 @@ import static com.android.launcher3.anim.Interpolators.DEACCEL_3;
 import static com.android.launcher3.anim.Interpolators.LINEAR;
 import static com.android.launcher3.anim.Interpolators.scrollInterpolatorForVelocity;
 import static com.android.launcher3.logging.StatsLogManager.LAUNCHER_STATE_HOME;
+import static com.android.launcher3.logging.StatsLogManager.LauncherEvent.LAUNCHER_QUICKSWITCH_RIGHT;
 import static com.android.launcher3.logging.StatsLogManager.LauncherEvent.LAUNCHER_UNKNOWN_SWIPEDOWN;
 import static com.android.launcher3.logging.StatsLogManager.LauncherEvent.LAUNCHER_UNKNOWN_SWIPEUP;
 import static com.android.launcher3.logging.StatsLogManager.getLauncherAtomEvent;
@@ -40,13 +41,14 @@ import static com.android.launcher3.states.StateAnimationConfig.SKIP_OVERVIEW;
 import static com.android.launcher3.states.StateAnimationConfig.SKIP_SCRIM;
 import static com.android.launcher3.touch.BothAxesSwipeDetector.DIRECTION_RIGHT;
 import static com.android.launcher3.touch.BothAxesSwipeDetector.DIRECTION_UP;
-import static com.android.launcher3.util.DisplayController.getSingleFrameMs;
+import static com.android.launcher3.util.window.RefreshRateTracker.getSingleFrameMs;
 import static com.android.quickstep.util.VibratorWrapper.OVERVIEW_HAPTIC;
 import static com.android.quickstep.views.RecentsView.ADJACENT_PAGE_HORIZONTAL_OFFSET;
 import static com.android.quickstep.views.RecentsView.CONTENT_ALPHA;
 import static com.android.quickstep.views.RecentsView.FULLSCREEN_PROGRESS;
 import static com.android.quickstep.views.RecentsView.RECENTS_SCALE_PROPERTY;
 import static com.android.quickstep.views.RecentsView.TASK_SECONDARY_TRANSLATION;
+import static com.android.quickstep.views.RecentsView.TASK_THUMBNAIL_SPLASH_ALPHA;
 import static com.android.systemui.shared.system.QuickStepContract.SYSUI_STATE_OVERVIEW_DISABLED;
 
 import android.animation.Animator;
@@ -57,7 +59,6 @@ import android.graphics.PointF;
 import android.view.MotionEvent;
 import android.view.animation.Interpolator;
 
-import com.android.launcher3.BaseQuickstepLauncher;
 import com.android.launcher3.LauncherState;
 import com.android.launcher3.R;
 import com.android.launcher3.Utilities;
@@ -66,6 +67,7 @@ import com.android.launcher3.anim.PendingAnimation;
 import com.android.launcher3.states.StateAnimationConfig;
 import com.android.launcher3.touch.BaseSwipeDetector;
 import com.android.launcher3.touch.BothAxesSwipeDetector;
+import com.android.launcher3.uioverrides.QuickstepLauncher;
 import com.android.launcher3.util.TouchController;
 import com.android.quickstep.AnimatedFloat;
 import com.android.quickstep.SystemUiProxy;
@@ -90,7 +92,7 @@ public class NoButtonQuickSwitchTouchController implements TouchController,
     private static final Interpolator SCALE_DOWN_INTERPOLATOR = LINEAR;
     private static final long ATOMIC_DURATION_FROM_PAUSED_TO_OVERVIEW = 300;
 
-    private final BaseQuickstepLauncher mLauncher;
+    private final QuickstepLauncher mLauncher;
     private final BothAxesSwipeDetector mSwipeDetector;
     private final float mXRange;
     private final float mYRange;
@@ -112,7 +114,7 @@ public class NoButtonQuickSwitchTouchController implements TouchController,
     private AnimatorPlaybackController mXOverviewAnim;
     private AnimatedFloat mYOverviewAnim;
 
-    public NoButtonQuickSwitchTouchController(BaseQuickstepLauncher launcher) {
+    public NoButtonQuickSwitchTouchController(QuickstepLauncher launcher) {
         mLauncher = launcher;
         mSwipeDetector = new BothAxesSwipeDetector(mLauncher, this);
         mRecentsView = mLauncher.getOverviewPanel();
@@ -224,10 +226,12 @@ public class NoButtonQuickSwitchTouchController implements TouchController,
         // Set RecentView's initial properties.
         RECENTS_SCALE_PROPERTY.set(mRecentsView, fromState.getOverviewScaleAndOffset(mLauncher)[0]);
         ADJACENT_PAGE_HORIZONTAL_OFFSET.set(mRecentsView, 1f);
+        TASK_THUMBNAIL_SPLASH_ALPHA.set(mRecentsView, fromState.showTaskThumbnailSplash() ? 1f : 0);
         mRecentsView.setContentAlpha(1);
         mRecentsView.setFullscreenProgress(fromState.getOverviewFullscreenProgress());
         mLauncher.getActionsView().getVisibilityAlpha().setValue(
                 (fromState.getVisibleElements(mLauncher) & OVERVIEW_ACTIONS) != 0 ? 1f : 0f);
+        mRecentsView.setTaskIconScaledDown(true);
 
         float[] scaleAndOffset = toState.getOverviewScaleAndOffset(mLauncher);
         // As we drag right, animate the following properties:
@@ -299,6 +303,7 @@ public class NoButtonQuickSwitchTouchController implements TouchController,
         boolean verticalFling = mSwipeDetector.isFling(velocity.y);
         boolean noFling = !horizontalFling && !verticalFling;
         if (mMotionPauseDetector.isPaused() && noFling) {
+            // Going to Overview.
             cancelAnimations();
 
             StateAnimationConfig config = new StateAnimationConfig();
@@ -309,6 +314,8 @@ public class NoButtonQuickSwitchTouchController implements TouchController,
                 @Override
                 public void onAnimationEnd(Animator animation) {
                     onAnimationToStateCompleted(OVERVIEW);
+                    // Animate the icon after onAnimationToStateCompleted() so it doesn't clobber.
+                    mRecentsView.animateUpTaskIconScale();
                 }
             });
             overviewAnim.start();
@@ -430,9 +437,11 @@ public class NoButtonQuickSwitchTouchController implements TouchController,
                 .withSrcState(LAUNCHER_STATE_HOME)
                 .withDstState(targetState.statsLogOrdinal)
                 .log(getLauncherAtomEvent(mStartState.statsLogOrdinal, targetState.statsLogOrdinal,
-                        targetState.ordinal > mStartState.ordinal
-                                ? LAUNCHER_UNKNOWN_SWIPEUP
-                                : LAUNCHER_UNKNOWN_SWIPEDOWN));
+                        targetState == QUICK_SWITCH
+                                ? LAUNCHER_QUICKSWITCH_RIGHT
+                                : targetState.ordinal > mStartState.ordinal
+                                        ? LAUNCHER_UNKNOWN_SWIPEUP
+                                        : LAUNCHER_UNKNOWN_SWIPEDOWN));
         mLauncher.getStateManager().goToState(targetState, false, forEndCallback(this::clearState));
     }
 

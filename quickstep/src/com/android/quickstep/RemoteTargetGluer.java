@@ -20,12 +20,13 @@ import android.content.Context;
 
 import androidx.annotation.Nullable;
 
-import com.android.launcher3.util.SplitConfigurationOptions.StagedSplitBounds;
+import com.android.launcher3.util.SplitConfigurationOptions.SplitBounds;
 import com.android.quickstep.util.AnimatorControllerWithResistance;
-import com.android.quickstep.util.LauncherSplitScreenListener;
 import com.android.quickstep.util.TaskViewSimulator;
 import com.android.quickstep.util.TransformParams;
 import com.android.systemui.shared.system.RemoteAnimationTargetCompat;
+
+import java.util.ArrayList;
 
 /**
  * Glues together the necessary components to animate a remote target using a
@@ -33,7 +34,7 @@ import com.android.systemui.shared.system.RemoteAnimationTargetCompat;
  */
 public class RemoteTargetGluer {
     private RemoteTargetHandle[] mRemoteTargetHandles;
-    private StagedSplitBounds mStagedSplitBounds;
+    private SplitBounds mSplitBounds;
 
     /**
      * Use this constructor if remote targets are split-screen independent
@@ -48,8 +49,7 @@ public class RemoteTargetGluer {
      * running tasks
      */
     public RemoteTargetGluer(Context context, BaseActivityInterface sizingStrategy) {
-        int[] splitIds = LauncherSplitScreenListener.INSTANCE.getNoCreate()
-                .getRunningSplitTaskIds();
+        int[] splitIds = TopTaskTracker.INSTANCE.get(context).getRunningSplitTaskIds();
         mRemoteTargetHandles = createHandles(context, sizingStrategy, splitIds.length == 2 ? 2 : 1);
     }
 
@@ -71,13 +71,13 @@ public class RemoteTargetGluer {
      * Length of targets.apps should match that of {@link #mRemoteTargetHandles}.
      *
      * If split screen may be active when this is called, you might want to use
-     * {@link #assignTargetsForSplitScreen(RemoteAnimationTargets)}
+     * {@link #assignTargetsForSplitScreen(Context, RemoteAnimationTargets)}
      */
     public RemoteTargetHandle[] assignTargets(RemoteAnimationTargets targets) {
         for (int i = 0; i < mRemoteTargetHandles.length; i++) {
             RemoteAnimationTargetCompat primaryTaskTarget = targets.apps[i];
             mRemoteTargetHandles[i].mTransformParams.setTargetSet(
-                    createRemoteAnimationTargetsForTarget(primaryTaskTarget, targets));
+                    createRemoteAnimationTargetsForTarget(targets, null));
             mRemoteTargetHandles[i].mTaskViewSimulator.setPreview(primaryTaskTarget, null);
         }
         return mRemoteTargetHandles;
@@ -88,63 +88,93 @@ public class RemoteTargetGluer {
      * apps in targets.apps to that of the _active_ split screened tasks.
      * See {@link #assignTargetsForSplitScreen(RemoteAnimationTargets, int[])}
      */
-    public RemoteTargetHandle[] assignTargetsForSplitScreen(RemoteAnimationTargets targets) {
-        int[] splitIds = LauncherSplitScreenListener.INSTANCE.getNoCreate()
-                .getRunningSplitTaskIds();
+    public RemoteTargetHandle[] assignTargetsForSplitScreen(
+            Context context, RemoteAnimationTargets targets) {
+        int[] splitIds = TopTaskTracker.INSTANCE.get(context).getRunningSplitTaskIds();
         return assignTargetsForSplitScreen(targets, splitIds);
     }
 
     /**
-     * Assigns the provided splitIDs to the {@link #mRemoteTargetHandles}, with index 0 will beint
+     * Assigns the provided splitIDs to the {@link #mRemoteTargetHandles}, with index 0 will being
      * the left/top task, index 1 right/bottom
      */
     public RemoteTargetHandle[] assignTargetsForSplitScreen(RemoteAnimationTargets targets,
             int[] splitIds) {
-        RemoteAnimationTargetCompat primaryTaskTarget;
-        RemoteAnimationTargetCompat secondaryTaskTarget;
+        RemoteAnimationTargetCompat topLeftTarget; // only one set if single/fullscreen task
+        RemoteAnimationTargetCompat bottomRightTarget;
         if (mRemoteTargetHandles.length == 1) {
             // If we're not in split screen, the splitIds count doesn't really matter since we
             // should always hit this case.
             mRemoteTargetHandles[0].mTransformParams.setTargetSet(targets);
             if (targets.apps.length > 0) {
                 // Unclear why/when target.apps length == 0, but it sure does happen :(
-                primaryTaskTarget = targets.apps[0];
-                mRemoteTargetHandles[0].mTaskViewSimulator.setPreview(primaryTaskTarget, null);
+                topLeftTarget = targets.apps[0];
+                mRemoteTargetHandles[0].mTaskViewSimulator.setPreview(topLeftTarget, null);
             }
         } else {
             // split screen
-            primaryTaskTarget = targets.findTask(splitIds[0]);
-            secondaryTaskTarget = targets.findTask(splitIds[1]);
+            topLeftTarget = targets.findTask(splitIds[0]);
+            bottomRightTarget = targets.findTask(splitIds[1]);
 
-            mStagedSplitBounds = new StagedSplitBounds(
-                    primaryTaskTarget.startScreenSpaceBounds,
-                    secondaryTaskTarget.startScreenSpaceBounds, splitIds[0], splitIds[1]);
+            // remoteTargetHandle[0] denotes topLeft task, so we pass in the bottomRight to exclude,
+            // vice versa
+            mSplitBounds = new SplitBounds(
+                    topLeftTarget.startScreenSpaceBounds,
+                    bottomRightTarget.startScreenSpaceBounds, splitIds[0], splitIds[1]);
             mRemoteTargetHandles[0].mTransformParams.setTargetSet(
-                    createRemoteAnimationTargetsForTarget(primaryTaskTarget, targets));
-            mRemoteTargetHandles[0].mTaskViewSimulator.setPreview(primaryTaskTarget,
-                    mStagedSplitBounds);
+                    createRemoteAnimationTargetsForTarget(targets, bottomRightTarget));
+            mRemoteTargetHandles[0].mTaskViewSimulator.setPreview(topLeftTarget,
+                    mSplitBounds);
 
             mRemoteTargetHandles[1].mTransformParams.setTargetSet(
-                    createRemoteAnimationTargetsForTarget(secondaryTaskTarget, targets));
-            mRemoteTargetHandles[1].mTaskViewSimulator.setPreview(secondaryTaskTarget,
-                    mStagedSplitBounds);
+                    createRemoteAnimationTargetsForTarget(targets, topLeftTarget));
+            mRemoteTargetHandles[1].mTaskViewSimulator.setPreview(bottomRightTarget,
+                    mSplitBounds);
         }
         return mRemoteTargetHandles;
     }
 
+    /**
+     * Ensures that we aren't excluding ancillary targets such as home/recents
+     *
+     * @param targetToExclude Will be excluded from the resulting return value.
+     *                        Pass in {@code null} to not exclude anything
+     * @return RemoteAnimationTargets where all the app targets from the passed in
+     *         {@param targets} are included except {@param targetToExclude}
+     */
     private RemoteAnimationTargets createRemoteAnimationTargetsForTarget(
-            RemoteAnimationTargetCompat target,
-            RemoteAnimationTargets targets) {
-        return new RemoteAnimationTargets(new RemoteAnimationTargetCompat[]{target},
-                targets.wallpapers, targets.nonApps, targets.targetMode);
+            RemoteAnimationTargets targets,
+            RemoteAnimationTargetCompat targetToExclude) {
+        ArrayList<RemoteAnimationTargetCompat> targetsWithoutExcluded =
+                new ArrayList<RemoteAnimationTargetCompat>();
+
+        for (RemoteAnimationTargetCompat targetCompat : targets.unfilteredApps) {
+            if (targetCompat == targetToExclude) {
+                continue;
+            }
+            if (targetToExclude != null
+                    && targetToExclude.taskInfo != null
+                    && targetCompat.taskInfo != null
+                    && targetToExclude.taskInfo.parentTaskId == targetCompat.taskInfo.taskId) {
+                // Also exclude corresponding parent task
+                continue;
+            }
+
+            targetsWithoutExcluded.add(targetCompat);
+        }
+        final RemoteAnimationTargetCompat[] filteredApps =
+                targetsWithoutExcluded.toArray(
+                        new RemoteAnimationTargetCompat[targetsWithoutExcluded.size()]);
+        return new RemoteAnimationTargets(
+                filteredApps, targets.wallpapers, targets.nonApps, targets.targetMode);
     }
 
     public RemoteTargetHandle[] getRemoteTargetHandles() {
         return mRemoteTargetHandles;
     }
 
-    public StagedSplitBounds getStagedSplitBounds() {
-        return mStagedSplitBounds;
+    public SplitBounds getSplitBounds() {
+        return mSplitBounds;
     }
 
     /**

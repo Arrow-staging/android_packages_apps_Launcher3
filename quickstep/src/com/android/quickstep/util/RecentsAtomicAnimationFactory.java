@@ -46,8 +46,9 @@ public class RecentsAtomicAnimationFactory<ACTIVITY_TYPE extends StatefulActivit
     public Animator createStateElementAnimation(int index, float... values) {
         switch (index) {
             case INDEX_RECENTS_FADE_ANIM:
-                return ObjectAnimator.ofFloat(mActivity.getOverviewPanel(),
+                ObjectAnimator alpha = ObjectAnimator.ofFloat(mActivity.getOverviewPanel(),
                         RecentsView.CONTENT_ALPHA, values);
+                return alpha;
             case INDEX_RECENTS_TRANSLATE_X_ANIM: {
                 RecentsView rv = mActivity.getOverviewPanel();
                 return new SpringAnimationBuilder(mActivity)

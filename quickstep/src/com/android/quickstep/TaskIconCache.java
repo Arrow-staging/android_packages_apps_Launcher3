@@ -18,6 +18,8 @@ package com.android.quickstep;
 import static com.android.launcher3.uioverrides.QuickstepLauncher.GO_LOW_RAM_RECENTS_ENABLED;
 import static com.android.launcher3.util.DisplayController.CHANGE_DENSITY;
 
+import android.annotation.Nullable;
+import android.app.ActivityManager;
 import android.app.ActivityManager.TaskDescription;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
@@ -28,6 +30,7 @@ import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.os.UserHandle;
 import android.text.TextUtils;
+import android.util.SparseArray;
 import android.view.accessibility.AccessibilityManager;
 
 import androidx.annotation.WorkerThread;
@@ -44,10 +47,10 @@ import com.android.launcher3.util.DisplayController.Info;
 import com.android.launcher3.util.Preconditions;
 import com.android.quickstep.util.CancellableTask;
 import com.android.quickstep.util.TaskKeyLruCache;
+import com.android.quickstep.util.TaskVisualsChangeListener;
 import com.android.systemui.shared.recents.model.Task;
 import com.android.systemui.shared.recents.model.Task.TaskKey;
 import com.android.systemui.shared.system.PackageManagerWrapper;
-import com.android.systemui.shared.system.TaskDescriptionCompat;
 
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
@@ -62,10 +65,15 @@ public class TaskIconCache implements DisplayInfoChangeListener {
 
     private final Context mContext;
     private final TaskKeyLruCache<TaskCacheEntry> mIconCache;
-    private final BitmapInfo[] mDefaultIcons = new BitmapInfo[1];
+    private final SparseArray<BitmapInfo> mDefaultIcons = new SparseArray<>();
+    private BitmapInfo mDefaultIconBase = null;
+
     private final IconProvider mIconProvider;
 
     private BaseIconFactory mIconFactory;
+
+    @Nullable
+    public TaskVisualsChangeListener mTaskVisualsChangeListener = null;
 
     public TaskIconCache(Context context, Executor bgExecutor, IconProvider iconProvider) {
         mContext = context;
@@ -113,6 +121,7 @@ public class TaskIconCache implements DisplayInfoChangeListener {
                 task.icon = result.icon;
                 task.titleDescription = result.contentDescription;
                 callback.accept(task);
+                dispatchIconUpdate(task.key.id);
             }
         };
         mBgExecutor.execute(request);
@@ -151,7 +160,7 @@ public class TaskIconCache implements DisplayInfoChangeListener {
 
         // Load icon
         // TODO: Load icon resource (b/143363444)
-        Bitmap icon = TaskDescriptionCompat.getIcon(desc, key.userId);
+        Bitmap icon = getIcon(desc, key.userId);
         if (icon != null) {
             entry.icon = getBitmapInfo(
                     new BitmapDrawable(mContext.getResources(), icon),
@@ -190,6 +199,14 @@ public class TaskIconCache implements DisplayInfoChangeListener {
         return entry;
     }
 
+    private Bitmap getIcon(ActivityManager.TaskDescription desc, int userId) {
+        if (desc.getInMemoryIcon() != null) {
+            return desc.getInMemoryIcon();
+        }
+        return ActivityManager.TaskDescription.loadTaskDescriptionIcon(
+                desc.getIconFilename(), userId);
+    }
+
     private String getBadgedContentDescription(ActivityInfo info, int userId, TaskDescription td) {
         PackageManager pm = mContext.getPackageManager();
         String taskLabel = td == null ? null : Utilities.trim(td.getLabel());
@@ -208,12 +225,23 @@ public class TaskIconCache implements DisplayInfoChangeListener {
     @WorkerThread
     private Drawable getDefaultIcon(int userId) {
         synchronized (mDefaultIcons) {
-            if (mDefaultIcons[0] == null) {
+            if (mDefaultIconBase == null) {
                 try (BaseIconFactory bif = getIconFactory()) {
-                    mDefaultIcons[0] = bif.makeDefaultIcon();
+                    mDefaultIconBase = bif.makeDefaultIcon();
                 }
             }
-            return mDefaultIcons[0].clone().withUser(UserHandle.of(userId)).newIcon(mContext);
+
+            int index;
+            if ((index = mDefaultIcons.indexOfKey(userId)) >= 0) {
+                return mDefaultIcons.valueAt(index).newIcon(mContext);
+            } else {
+                try (BaseIconFactory li = getIconFactory()) {
+                    BitmapInfo info = mDefaultIconBase.withFlags(
+                            li.getBitmapFlagOp(new IconOptions().setUser(UserHandle.of(userId))));
+                    mDefaultIcons.put(userId, info);
+                    return info.newIcon(mContext);
+                }
+            }
         }
     }
 
@@ -234,8 +262,9 @@ public class TaskIconCache implements DisplayInfoChangeListener {
     private BaseIconFactory getIconFactory() {
         if (mIconFactory == null) {
             mIconFactory = new BaseIconFactory(mContext,
-                    DisplayController.INSTANCE.get(mContext).getInfo().densityDpi,
-                    mContext.getResources().getDimensionPixelSize(R.dimen.taskbar_icon_size));
+                    DisplayController.INSTANCE.get(mContext).getInfo().getDensityDpi(),
+                    mContext.getResources().getDimensionPixelSize(
+                            R.dimen.task_icon_cache_default_icon_size));
         }
         return mIconFactory;
     }
@@ -249,5 +278,19 @@ public class TaskIconCache implements DisplayInfoChangeListener {
     private static class TaskCacheEntry {
         public Drawable icon;
         public String contentDescription = "";
+    }
+
+    void registerTaskVisualsChangeListener(TaskVisualsChangeListener newListener) {
+        mTaskVisualsChangeListener = newListener;
+    }
+
+    void removeTaskVisualsChangeListener() {
+        mTaskVisualsChangeListener = null;
+    }
+
+    void dispatchIconUpdate(int taskId) {
+        if (mTaskVisualsChangeListener != null) {
+            mTaskVisualsChangeListener.onTaskIconChanged(taskId);
+        }
     }
 }

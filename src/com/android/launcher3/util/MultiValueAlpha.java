@@ -23,6 +23,7 @@ import android.view.View;
 
 import com.android.launcher3.anim.AlphaUpdateListener;
 
+import java.io.PrintWriter;
 import java.util.Arrays;
 import java.util.function.Consumer;
 
@@ -78,6 +79,29 @@ public class MultiValueAlpha {
         mUpdateVisibility = updateVisibility;
     }
 
+    /**
+     * Dumps the alpha channel values to the given PrintWriter
+     *
+     * @param prefix String to be used before every line
+     * @param pw PrintWriter where the logs should be dumped
+     * @param label String used to help identify this object
+     * @param alphaIndexLabels Strings that represent each alpha channel, these should be entered
+     *                         in the order of the indexes they represent, starting from 0.
+     */
+    public void dump(String prefix, PrintWriter pw, String label, String... alphaIndexLabels) {
+        pw.println(prefix + label);
+
+        String innerPrefix = prefix + '\t';
+        for (int i = 0; i < alphaIndexLabels.length; i++) {
+            if (i >= mMyProperties.length) {
+                pw.println(innerPrefix + alphaIndexLabels[i] + " given for alpha index " + i
+                        + " however there are only " + mMyProperties.length + " alpha channels.");
+                continue;
+            }
+            pw.println(innerPrefix + alphaIndexLabels[i] + "=" + getProperty(i).getValue());
+        }
+    }
+
     public class AlphaProperty {
 
         private final int mMyMask;
@@ -128,6 +152,9 @@ public class MultiValueAlpha {
 
         public void setConsumer(Consumer<Float> consumer) {
             mConsumer = consumer;
+            if (mConsumer != null) {
+                mConsumer.accept(mValue);
+            }
         }
 
         @Override
